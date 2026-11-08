@@ -1,0 +1,4 @@
+<resources>
+    <!-- Compose draws the UI; this theme only covers the window before the first frame. -->
+    <style name="Theme.Activities" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

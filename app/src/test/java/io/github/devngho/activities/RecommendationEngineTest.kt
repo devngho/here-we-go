@@ -1,0 +1,76 @@
+package io.github.devngho.activities
+
+import io.github.devngho.activities.data.SamplePlaces
+import io.github.devngho.activities.data.UserProfileRepository
+import io.github.devngho.activities.data.model.PlaceCategory
+import io.github.devngho.activities.data.model.Purpose
+import io.github.devngho.activities.data.model.Schedule
+import io.github.devngho.activities.domain.GapZone
+import io.github.devngho.activities.domain.RecommendationEngine
+import io.github.devngho.activities.domain.minutesBetween
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.time.LocalTime
+
+class RecommendationEngineTest {
+
+    private val engine = RecommendationEngine(SamplePlaces.all)
+    private val profile = UserProfileRepository().profile.value
+
+    @Test
+    fun `func1 - after lunch at a restaurant, a cafe comes first`() {
+        val here = SamplePlaces.yangjaeRestaurant
+        val recs = engine.nearby(here, here.location, profile, LocalTime.of(13, 10), personalWeight = 0.15)
+
+        println("Func1: " + recs.joinToString { "${it.place.name}(${it.reasons.joinToString("/")})" })
+        assertTrue(recs.isNotEmpty())
+        assertEquals(PlaceCategory.CAFE, recs.first().place.category)
+        assertTrue(recs.none { it.place.id == here.id || !it.place.category.recommendable })
+    }
+
+    @Test
+    fun `func2 - housewarming route has florist and mart within detour`() {
+        val origin = SamplePlaces.office42dot.location
+        val result = engine.forPurpose(Purpose.HOUSEWARMING, origin, SamplePlaces.friendHouse, profile, LocalTime.of(13, 10))
+
+        result.forEach { s -> println("Func2 ${s.need.item}: " + s.stops.joinToString { "${it.place.name} +${it.detourMinutes}min p=${"%.2f".format(it.progress)}" }) }
+        val florist = result.first { it.need.category == PlaceCategory.FLORIST }
+        val mart = result.first { it.need.category == PlaceCategory.MART }
+        assertTrue(florist.stops.isNotEmpty())
+        assertTrue(mart.stops.isNotEmpty())
+        // 꽃은 도착 직전 구매 선호 → 첫 후보가 경로 후반부
+        assertTrue(florist.stops.first().progress > 0.5)
+    }
+
+    @Test
+    fun `func3 - meeting ended an hour early gives options in every zone that respect B start`() {
+        val a = Schedule("판교 미팅", SamplePlaces.softwareDreamCenter, LocalTime.of(14, 0), LocalTime.of(16, 0))
+        val b = Schedule("양재 약속", SamplePlaces.office42dot, LocalTime.of(17, 0), LocalTime.of(19, 0))
+        val plan = engine.forGap(a, b, LocalTime.of(15, 0), profile)
+
+        println("Func3 gap=${plan.totalGapMinutes} travel=${plan.travelMinutes} free=${plan.freeMinutes} leaveBy=${plan.leaveBy}")
+        plan.stops.forEach { (zone, stops) ->
+            println("  $zone: " + stops.joinToString { "${it.place.name} ${it.arriveAt}-${it.leaveAt} →B ${it.arriveBAt}" })
+        }
+        assertTrue(plan.freeMinutes >= 15)
+        GapZone.entries.forEach { zone -> assertFalse("$zone empty", plan.stops[zone].isNullOrEmpty()) }
+        plan.stops.values.flatten().forEach { assertTrue(minutesBetween(it.arriveBAt, b.start) >= 0) }
+    }
+
+    @Test
+    fun `func3 - no slack means no recommendations`() {
+        val a = Schedule("판교 미팅", SamplePlaces.softwareDreamCenter, LocalTime.of(14, 0), LocalTime.of(16, 0))
+        val b = Schedule("양재 약속", SamplePlaces.office42dot, LocalTime.of(16, 30), LocalTime.of(18, 0))
+        val plan = engine.forGap(a, b, LocalTime.of(16, 0), profile)
+        assertTrue(plan.stops.values.all { it.isEmpty() })
+    }
+
+    @Test
+    fun `profile learns categories from recent destination names`() {
+        assertEquals(PlaceCategory.GYM, UserProfileRepository.classify("판교 요가 & 필라테스"))
+        assertEquals(PlaceCategory.CAFE, UserProfileRepository.classify("도곡 스페셜티 커피"))
+        assertEquals(PlaceCategory.PARK, UserProfileRepository.classify("양재 시민의 숲"))
+    }
+}

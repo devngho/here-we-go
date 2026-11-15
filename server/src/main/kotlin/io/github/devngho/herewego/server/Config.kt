@@ -21,12 +21,44 @@ data class Config(
     val insightTimeoutMillis: Long = 10_000,
     /** 한 요청이 새로 요약하는 최대 장소 수. 0 이면 요약하지 않는다 (평점·영업시간은 그대로 나온다). */
     val insightMaxPlaces: Int = 24,
+    /** Fail closed on invalid limits; zero disables the corresponding paid API. */
+    val apiRequestsPerMinute: Int = 60,
+    val deviceRequestsPerMinute: Int = 20,
+    val placesCallsPerMinute: Int = 40,
+    val placesCallsPerDay: Int = 100,
+    val placesCallsPerMonth: Int = 1_000,
+    val geminiCallsPerMinute: Int = 10,
+    val geminiCallsPerDay: Int = 60,
+    val geminiCallsPerMonth: Int = 500,
     /** SQLite 파일 위치 (M4 부터 사용). */
     val dbPath: String = "data/herewego.db",
 ) {
+    init {
+        require(
+            listOf(
+                apiRequestsPerMinute,
+                deviceRequestsPerMinute,
+                placesCallsPerMinute,
+                placesCallsPerDay,
+                placesCallsPerMonth,
+                geminiCallsPerMinute,
+                geminiCallsPerDay,
+                geminiCallsPerMonth,
+            ).all { it >= 0 },
+        ) { "Rate limits must be non-negative" }
+    }
+
     companion object {
         fun fromEnv(env: Map<String, String> = System.getenv()): Config {
             fun get(name: String) = env[name]?.trim()?.takeIf { it.isNotEmpty() }
+
+            fun limit(
+                name: String,
+                default: Int,
+            ): Int =
+                get(name)?.let {
+                    requireNotNull(it.toIntOrNull()?.takeIf { n -> n >= 0 }) { "$name must be a non-negative integer" }
+                } ?: default
             val default = Config()
             return Config(
                 port = get("PORT")?.toIntOrNull() ?: default.port,
@@ -38,6 +70,14 @@ data class Config(
                 insightTimeoutMillis = get("INSIGHT_TIMEOUT_MS")?.toLongOrNull() ?: default.insightTimeoutMillis,
                 insightMaxPlaces = get("INSIGHT_MAX_PLACES")?.toIntOrNull() ?: default.insightMaxPlaces,
                 dbPath = get("DB_PATH") ?: default.dbPath,
+                apiRequestsPerMinute = limit("API_REQUESTS_PER_MINUTE", default.apiRequestsPerMinute),
+                deviceRequestsPerMinute = limit("DEVICE_REQUESTS_PER_MINUTE", default.deviceRequestsPerMinute),
+                placesCallsPerMinute = limit("PLACES_CALLS_PER_MINUTE", default.placesCallsPerMinute),
+                placesCallsPerDay = limit("PLACES_CALLS_PER_DAY", default.placesCallsPerDay),
+                placesCallsPerMonth = limit("PLACES_CALLS_PER_MONTH", default.placesCallsPerMonth),
+                geminiCallsPerMinute = limit("GEMINI_CALLS_PER_MINUTE", default.geminiCallsPerMinute),
+                geminiCallsPerDay = limit("GEMINI_CALLS_PER_DAY", default.geminiCallsPerDay),
+                geminiCallsPerMonth = limit("GEMINI_CALLS_PER_MONTH", default.geminiCallsPerMonth),
             )
         }
     }

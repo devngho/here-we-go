@@ -1,43 +1,45 @@
 package io.github.devngho.herewego.server
 
-import io.github.devngho.herewego.server.api.LearnedPlaceDto
-import io.github.devngho.herewego.server.api.ProfileDto
-import io.github.devngho.herewego.server.api.ScheduleDto
-import io.github.devngho.herewego.server.api.VisitsRequest
-import io.github.devngho.herewego.server.api.VisitsResponse
-import io.github.devngho.herewego.server.api.deviceId
-import io.github.devngho.herewego.server.domain.NameClassifier
-import io.github.devngho.herewego.server.service.parseTime
-import io.github.devngho.herewego.server.store.Store
-import io.ktor.server.application.ApplicationStopped
-import io.ktor.server.routing.delete
-import io.ktor.server.routing.put
-import io.github.devngho.herewego.server.llm.GeminiClient
-import io.github.devngho.herewego.server.llm.Llm
-import io.github.devngho.herewego.server.llm.LlmRanker
-import io.github.devngho.herewego.server.llm.PlaceInsights
-import kotlin.time.Duration.Companion.milliseconds
 import io.github.devngho.herewego.server.api.ApiException
 import io.github.devngho.herewego.server.api.ApiGuard
+import io.github.devngho.herewego.server.api.BudgetedLlm
+import io.github.devngho.herewego.server.api.BudgetedPlaceSearch
 import io.github.devngho.herewego.server.api.ErrorBody
 import io.github.devngho.herewego.server.api.ErrorResponse
 import io.github.devngho.herewego.server.api.ExploreRequest
 import io.github.devngho.herewego.server.api.GapPlanRequest
 import io.github.devngho.herewego.server.api.LatLng
-import io.github.devngho.herewego.server.api.PurposePlanRequest
+import io.github.devngho.herewego.server.api.LearnedPlaceDto
+import io.github.devngho.herewego.server.api.PaidCallBudget
+import io.github.devngho.herewego.server.api.ProfileDto
 import io.github.devngho.herewego.server.api.PurposeDto
+import io.github.devngho.herewego.server.api.PurposePlanRequest
+import io.github.devngho.herewego.server.api.RequestLimiter
+import io.github.devngho.herewego.server.api.ScheduleDto
+import io.github.devngho.herewego.server.api.VisitsRequest
+import io.github.devngho.herewego.server.api.VisitsResponse
+import io.github.devngho.herewego.server.api.deviceId
+import io.github.devngho.herewego.server.domain.NameClassifier
+import io.github.devngho.herewego.server.llm.GeminiClient
+import io.github.devngho.herewego.server.llm.Llm
+import io.github.devngho.herewego.server.llm.LlmRanker
+import io.github.devngho.herewego.server.llm.PlaceInsights
+import io.github.devngho.herewego.server.model.Purpose
 import io.github.devngho.herewego.server.places.GooglePlacesClient
 import io.github.devngho.herewego.server.places.PlaceRepository
 import io.github.devngho.herewego.server.places.PlaceSearch
-import io.github.devngho.herewego.server.model.Purpose
 import io.github.devngho.herewego.server.service.ExploreService
 import io.github.devngho.herewego.server.service.GapService
 import io.github.devngho.herewego.server.service.PurposeService
+import io.github.devngho.herewego.server.service.parseTime
 import io.github.devngho.herewego.server.service.toDto
 import io.github.devngho.herewego.server.service.toPoint
+import io.github.devngho.herewego.server.store.Store
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
+import io.ktor.server.application.ApplicationStopped
 import io.ktor.server.application.install
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -48,11 +50,14 @@ import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
+import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
+import io.ktor.server.routing.put
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import kotlinx.serialization.json.Json
+import kotlin.time.Duration.Companion.milliseconds
 
 fun main() {
     val config = Config.fromEnv()
@@ -71,29 +76,41 @@ fun Application.module(
 ) {
     monitor.subscribe(ApplicationStopped) { store.close() }
 
-    val places = search?.let { PlaceRepository(it) }
-    val insights = llm?.takeIf { config.insightMaxPlaces > 0 }
-        ?.let { PlaceInsights(it, this, config.insightTimeoutMillis.milliseconds, config.insightMaxPlaces) }
-    val ranker = llm?.let { LlmRanker(it, config.llmTimeoutMillis.milliseconds) }
+    val budget = PaidCallBudget(store, config)
+    val guardedLlm = llm?.let { BudgetedLlm(it, budget) }
+    val places = search?.let { PlaceRepository(BudgetedPlaceSearch(it, budget)) }
+    val insights =
+        guardedLlm
+            ?.takeIf { config.insightMaxPlaces > 0 }
+            ?.let { PlaceInsights(it, this, config.insightTimeoutMillis.milliseconds, config.insightMaxPlaces) }
+    val ranker = guardedLlm?.let { LlmRanker(it, config.llmTimeoutMillis.milliseconds) }
     val explore = places?.let { ExploreService(it, ranker, insights) }
     val purpose = places?.let { PurposeService(it, ranker, insights) }
     val gap = places?.let { GapService(it, ranker, insights) }
+
     fun notConfigured(): Nothing =
         throw ApiException(HttpStatusCode.ServiceUnavailable, "NOT_CONFIGURED", "서버에 GOOGLE_PLACES_KEY 가 설정되지 않았어요")
 
     install(CallLogging)
     install(ContentNegotiation) {
-        json(Json { ignoreUnknownKeys = true; explicitNulls = false })
+        json(
+            Json {
+                ignoreUnknownKeys = true
+                explicitNulls = false
+            },
+        )
     }
     install(StatusPages) {
         exception<ApiException> { call, e ->
+            e.retryAfterSeconds?.let { call.response.headers.append(HttpHeaders.RetryAfter, it.toString()) }
             call.respond(e.status, ErrorResponse(ErrorBody(e.code, e.message)))
         }
         exception<BadRequestException> { call, e ->
             call.respond(HttpStatusCode.BadRequest, ErrorResponse(ErrorBody("BAD_REQUEST", e.message ?: "잘못된 요청이에요")))
         }
         exception<Throwable> { call, e ->
-            call.application.environment.log.error("Unhandled error", e)
+            call.application.environment.log
+                .error("Unhandled error", e)
             call.respond(HttpStatusCode.InternalServerError, ErrorResponse(ErrorBody("INTERNAL", "서버 오류가 발생했어요")))
         }
     }
@@ -106,7 +123,10 @@ fun Application.module(
         get("/healthz") { call.respondText("ok") }
 
         route("/v1") {
-            install(ApiGuard) { appKey = config.appKey }
+            install(ApiGuard) {
+                appKey = config.appKey
+                limiter = RequestLimiter(config.apiRequestsPerMinute, config.deviceRequestsPerMinute)
+            }
 
             /** Func 2 프리셋 목적. */
             get("/purposes") {
@@ -150,8 +170,11 @@ fun Application.module(
                 val visits = call.receive<VisitsRequest>().visits
                 val current = store.profile(call.deviceId) ?: ProfileDto()
                 val known = current.learnedPlaces.map { it.name }.toSet()
-                val learned = visits.distinctBy { it.name }.filter { it.name !in known }
-                    .mapNotNull { v -> NameClassifier.classify(v.name)?.let { LearnedPlaceDto(v.name, it) } }
+                val learned =
+                    visits
+                        .distinctBy { it.name }
+                        .filter { it.name !in known }
+                        .mapNotNull { v -> NameClassifier.classify(v.name)?.let { LearnedPlaceDto(v.name, it) } }
                 val counts = current.visitCounts.toMutableMap()
                 learned.forEach { counts.merge(it.category, 1, Int::plus) }
                 val updated = current.copy(visitCounts = counts, learnedPlaces = learned + current.learnedPlaces)
@@ -183,7 +206,10 @@ fun Application.module(
             /** 목적지·일정 장소 검색. */
             get("/places/search") {
                 val repo = places ?: notConfigured()
-                val q = call.request.queryParameters["q"]?.trim().orEmpty()
+                val q =
+                    call.request.queryParameters["q"]
+                        ?.trim()
+                        .orEmpty()
                 val lat = call.request.queryParameters["lat"]?.toDoubleOrNull()
                 val lng = call.request.queryParameters["lng"]?.toDoubleOrNull()
                 if (q.isEmpty() || lat == null || lng == null) {

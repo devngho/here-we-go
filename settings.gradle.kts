@@ -24,5 +24,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Activities"
+rootProject.name = "HereWeGo"
 include(":app")
